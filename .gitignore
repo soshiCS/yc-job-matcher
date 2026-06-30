@@ -1,0 +1,8 @@
+.venv/
+__pycache__/
+*.pyc
+.env
+.waas_state.json
+jobs.db
+jobs.db-wal
+jobs.db-shm
