@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 from pathlib import Path
 from typing import List
 
@@ -11,11 +10,10 @@ from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
+from . import db
 from .config import settings
-from .db import save_evaluated_jobs
 from .llm import JobFitLLM, LLMUnavailableError
-from .models import JobBrief, MatchResponse, RankedJob, RunCost
-from .ranker import cheap_prefilter
+from .models import IndexResponse, JobBrief, MatchResponse, RankedJob, RunCost
 from .resume_parser import ResumeParsingError, extract_resume_text
 from .yc_browser import (
     EXPERIENCE_FACET,
@@ -47,19 +45,39 @@ def index(request: Request):
     return templates.TemplateResponse("index.html", {"request": request})
 
 
-@app.post("/api/match", response_model=MatchResponse)
-async def match_jobs(
-    resume: UploadFile = File(...),
-    country: str = Form(...),
-    top_n: int = Form(...),
-    max_jobs_to_fetch: int = Form(...),
+def _validate_filters(role: str, experience_levels: list[str], remote_levels: list[str]):
+    if role.strip().lower() not in ROLE_FACET:
+        raise HTTPException(
+            status_code=400, detail=f"role must be one of: {', '.join(sorted(ROLE_FACET))}"
+        )
+    bad_exp = [lvl for lvl in experience_levels if lvl not in EXPERIENCE_FACET]
+    if bad_exp:
+        raise HTTPException(
+            status_code=400,
+            detail=f"experience_levels must be from: {', '.join(EXPERIENCE_FACET)}",
+        )
+    bad_remote = [lvl for lvl in remote_levels if lvl not in REMOTE_FACET]
+    if bad_remote:
+        raise HTTPException(
+            status_code=400,
+            detail=f"remote_levels must be from: {', '.join(REMOTE_FACET)}",
+        )
+
+
+@app.post("/api/index", response_model=IndexResponse)
+async def index_jobs(
+    country: str = Form("US"),
     role: str = Form("Engineering"),
     experience_levels: List[str] = Form(default=[]),
     remote_levels: List[str] = Form(default=[]),
+    max_jobs_to_fetch: int = Form(40),
     start_index: int = Form(0),
 ):
-    if top_n < 1 or top_n > 25:
-        raise HTTPException(status_code=400, detail="top_n must be between 1 and 25")
+    """Scrape jobs from YC, profile each into a standardized form, and store them.
+
+    Résumé-independent. This is the only flow that scrapes; it builds the database
+    the match flow queries.
+    """
     if max_jobs_to_fetch < 1 or max_jobs_to_fetch > settings.max_fetched_jobs:
         raise HTTPException(
             status_code=400,
@@ -67,36 +85,9 @@ async def match_jobs(
         )
     if start_index < 0:
         raise HTTPException(status_code=400, detail="start_index must be 0 or greater")
-    if role.strip().lower() not in ROLE_FACET:
-        raise HTTPException(
-            status_code=400,
-            detail=f"role must be one of: {', '.join(sorted(ROLE_FACET))}",
-        )
-    invalid_levels = [lvl for lvl in experience_levels if lvl not in EXPERIENCE_FACET]
-    if invalid_levels:
-        raise HTTPException(
-            status_code=400,
-            detail=f"experience_levels must be from: {', '.join(EXPERIENCE_FACET)}",
-        )
-    invalid_remote = [lvl for lvl in remote_levels if lvl not in REMOTE_FACET]
-    if invalid_remote:
-        raise HTTPException(
-            status_code=400,
-            detail=f"remote_levels must be from: {', '.join(REMOTE_FACET)}",
-        )
-
-    try:
-        content = await resume.read()
-        resume_text = extract_resume_text(resume.filename or "resume.pdf", content)
-    except ResumeParsingError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    _validate_filters(role, experience_levels, remote_levels)
 
     notes: list[str] = []
-    notes.append(f"Parsed resume: {len(resume_text)} characters extracted.")
-    print(f"\n[match] resume parsed: {len(resume_text)} chars; preview:\n{resume_text[:400]!r}")
-
-    # Logged-in browser search: role, location, and experience are all applied
-    # server-side by YC, so the returned jobs are already the filtered set.
     try:
         jobs = await run_in_threadpool(
             search_jobs,
@@ -110,98 +101,131 @@ async def match_jobs(
     except WaaSAuthError as exc:
         raise HTTPException(status_code=401, detail=str(exc)) from exc
     except Exception as exc:
-        raise HTTPException(
-            status_code=502, detail=f"Authenticated search failed: {exc}"
-        ) from exc
+        raise HTTPException(status_code=502, detail=f"Scrape failed: {exc}") from exc
 
-    filters = [f"role '{role}'", f"country '{country}'"]
-    if experience_levels:
-        filters.append(f"experience {experience_levels}")
-    if remote_levels:
-        filters.append(f"remote {remote_levels}")
-    window = f"jobs {start_index}–{start_index + len(jobs)}"
-    notes.append(
-        f"Authenticated YC search applied {', '.join(filters)} server-side; "
-        f"got {len(jobs)} matching jobs ({window})."
-    )
-    location_filtered_jobs = jobs
-
-    # Surface the full scraped pool (titles + links) so the selection is auditable.
-    fetched_jobs = [
-        JobBrief(title=j.title, company=j.company, location=j.location, url=j.url)
-        for j in location_filtered_jobs
-    ]
-    print(f"\n[match] scraped {len(fetched_jobs)} jobs:")
-    for j in fetched_jobs:
-        print(f"  - {j.title} @ {j.company} | {j.location} | {j.url}")
-
-    # Evaluate the WHOLE scraped window (the LLM scores each job independently, in
-    # chunks). top_n only slices how many results are displayed.
-    prefiltered = cheap_prefilter(
-        resume_text=resume_text,
-        jobs=location_filtered_jobs,
-        requested_country=country,
-        top_n=len(location_filtered_jobs),
-    )
-
-    scored_jobs: list[RankedJob] = [
-        RankedJob(
-            job=item.job,
-            heuristic_score=item.heuristic_score,
-            matched_keywords=item.matched_keywords,
-            llm_evaluation=None,
-        )
-        for item in prefiltered
-    ]
+    notes.append(f"Scraped {len(jobs)} jobs (window {start_index}–{start_index + len(jobs)}).")
+    print(f"\n[index] scraped {len(jobs)} jobs")
 
     cost: RunCost | None = None
+    indexed = new = 0
+    profiles = []
     try:
         llm = JobFitLLM()
-        evaluations = llm.evaluate_jobs(resume_text, [item.job for item in scored_jobs])
-        for ranked, evaluation in zip(scored_jobs, evaluations):
-            ranked.llm_evaluation = evaluation
-        cost = _compute_cost(llm)
-        notes.append(f"LLM scored {len(scored_jobs)} jobs independently.")
+        known = db.get_all_skill_names()
+        profiles = llm.extract_job_profiles(jobs, known)
+        indexed, new = db.index_jobs(list(zip(jobs, profiles)))
+        cost = _compute_cost(llm, "index")
     except LLMUnavailableError as exc:
-        notes.append(f"LLM evaluation skipped: {exc}")
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
-        notes.append(f"LLM evaluation failed and was skipped: {exc}")
+        raise HTTPException(status_code=502, detail=f"Indexing failed: {exc}") from exc
 
-    # Drop roles the LLM judged to be non-software-engineering (dev advocacy, DX,
-    # design, PM, etc.) so they never compete for a rank.
-    kept = [
-        s for s in scored_jobs
-        if s.llm_evaluation is None or s.llm_evaluation.is_software_engineering
+    skipped = sum(1 for p in profiles if not p.is_software_engineering)
+    notes.append(f"Indexed {indexed} software-engineering jobs ({new} new); skipped {skipped} non-SWE.")
+    total_jobs, total_skills = db.counts()
+    notes.append(f"Database now holds {total_jobs} jobs and {total_skills} skills.")
+
+    saved_briefs = [
+        JobBrief(title=j.title, company=j.company, location=j.location, url=j.url)
+        for j, p in zip(jobs, profiles)
+        if p.is_software_engineering
     ]
-    dropped = len(scored_jobs) - len(kept)
-    if dropped:
-        notes.append(f"Excluded {dropped} non-software-engineering role(s).")
-    scored_jobs = kept
-
-    # Persist the evaluated SWE jobs (dedup by job id; refreshes on re-evaluation).
-    resume_hash = hashlib.sha256(resume_text.encode("utf-8")).hexdigest()[:16]
-    try:
-        saved, new = save_evaluated_jobs(scored_jobs, resume_hash)
-        if saved:
-            notes.append(f"Saved {saved} SWE jobs to database ({new} new, {saved - new} updated).")
-    except Exception as exc:
-        notes.append(f"Database save skipped: {exc}")
-
-    scored_jobs.sort(
-        key=lambda item: (
-            item.llm_evaluation.interview_probability if item.llm_evaluation else -1,
-            item.heuristic_score,
-        ),
-        reverse=True,
+    return IndexResponse(
+        scraped=len(jobs),
+        indexed=indexed,
+        new=new,
+        skipped_non_swe=skipped,
+        db_total_jobs=total_jobs,
+        db_total_skills=total_skills,
+        jobs=saved_briefs,
+        cost=cost,
+        notes=notes,
     )
-    ranked_jobs = scored_jobs[:top_n]
+
+
+@app.post("/api/match", response_model=MatchResponse)
+async def match_jobs(
+    resume: UploadFile = File(...),
+    top_n: int = Form(8),
+    shortlist_size: int = Form(10),
+):
+    """Match a résumé against the saved jobs: profile the résumé, shortlist by skill
+    overlap (SQL, no LLM), then LLM-evaluate only the shortlist."""
+    if top_n < 1 or top_n > 25:
+        raise HTTPException(status_code=400, detail="top_n must be between 1 and 25")
+    if shortlist_size < 1 or shortlist_size > 50:
+        raise HTTPException(status_code=400, detail="shortlist_size must be between 1 and 50")
+
+    try:
+        content = await resume.read()
+        resume_text = extract_resume_text(resume.filename or "resume.pdf", content)
+    except ResumeParsingError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    total_jobs, _ = db.counts()
+    if total_jobs == 0:
+        raise HTTPException(
+            status_code=400,
+            detail="No jobs in the database yet. Run 'Index jobs' first.",
+        )
+
+    notes: list[str] = [f"Parsed resume: {len(resume_text)} characters extracted."]
+    print(f"\n[match] resume parsed: {len(resume_text)} chars")
+
+    cost: RunCost | None = None
+    llm: JobFitLLM | None = None
+    try:
+        llm = JobFitLLM()
+    except LLMUnavailableError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    # 1) Profile the résumé (1 LLM call) into the same skill vocabulary.
+    known = db.get_all_skill_names()
+    profile = llm.extract_resume_profile(resume_text, known)
+    notes.append(
+        f"Résumé profile: {profile.seniority or 'n/a'}, roles {profile.role_categories or '[]'}, "
+        f"{len(profile.skills)} skills."
+    )
+    print(f"[match] resume skills: {profile.skills}")
+
+    # 2) Shortlist from the DB by weighted skill overlap (pure SQL — no LLM per job).
+    shortlisted = db.shortlist(
+        profile.skills, limit=shortlist_size, role_categories=profile.role_categories
+    )
+    shortlist_ids = [jid for jid, _score in shortlisted]
+    candidate_jobs = db.load_jobs(shortlist_ids)
+    notes.append(
+        f"Shortlisted {len(candidate_jobs)} of {total_jobs} saved jobs by skill overlap."
+    )
+
+    fetched_jobs = [
+        JobBrief(title=j.title, company=j.company, location=j.location, url=j.url)
+        for j in candidate_jobs
+    ]
+
+    # 3) LLM-evaluate ONLY the shortlist (1 call) for interview probability.
+    ranked_jobs: list[RankedJob] = []
+    if candidate_jobs:
+        resume_skill_set = {s.lower() for s in profile.skills}
+        evaluations = llm.evaluate_jobs(resume_text, candidate_jobs)
+        for job, ev in zip(candidate_jobs, evaluations):
+            matched = [s for s in job.tags if s.lower() in resume_skill_set]
+            ranked_jobs.append(
+                RankedJob(job=job, heuristic_score=0.0, matched_keywords=matched, llm_evaluation=ev)
+            )
+        ranked_jobs.sort(
+            key=lambda r: r.llm_evaluation.interview_probability if r.llm_evaluation else -1,
+            reverse=True,
+        )
+        ranked_jobs = ranked_jobs[:top_n]
+        notes.append(f"LLM evaluated the {len(candidate_jobs)}-job shortlist.")
+
+    cost = _compute_cost(llm, "match")
 
     return MatchResponse(
-        requested_country=country,
-        max_jobs_to_fetch=max_jobs_to_fetch,
-        top_n_sent_to_llm=len(scored_jobs),
-        total_jobs_found=len(jobs),
-        total_jobs_after_country_filter=len(location_filtered_jobs),
+        db_total_jobs=total_jobs,
+        shortlist_size=len(candidate_jobs),
+        resume_skills=profile.skills,
         ranked_jobs=ranked_jobs,
         fetched_jobs=fetched_jobs,
         cost=cost,
@@ -209,8 +233,7 @@ async def match_jobs(
     )
 
 
-def _compute_cost(llm: JobFitLLM) -> RunCost:
-    total_tokens = llm.input_tokens + llm.output_tokens
+def _compute_cost(llm: JobFitLLM, label: str) -> RunCost:
     in_rate = settings.openai_input_cost_per_1m
     out_rate = settings.openai_output_cost_per_1m
     estimated_usd = None
@@ -225,12 +248,12 @@ def _compute_cost(llm: JobFitLLM) -> RunCost:
         llm_calls=llm.calls,
         input_tokens=llm.input_tokens,
         output_tokens=llm.output_tokens,
-        total_tokens=total_tokens,
+        total_tokens=llm.input_tokens + llm.output_tokens,
         estimated_usd=estimated_usd,
     )
-    price_str = f"${estimated_usd}" if estimated_usd is not None else "n/a (set rates)"
+    price = f"${estimated_usd}" if estimated_usd is not None else "n/a (set rates)"
     print(
-        f"[match] cost: {cost.llm_calls} LLM calls, "
-        f"{cost.input_tokens} in + {cost.output_tokens} out tokens, est {price_str}"
+        f"[{label}] cost: {cost.llm_calls} LLM calls, "
+        f"{cost.input_tokens} in + {cost.output_tokens} out tokens, est {price}"
     )
     return cost

@@ -39,6 +39,28 @@ class LLMJobEvaluation(BaseModel):
     should_apply: bool
 
 
+class SkillTag(BaseModel):
+    name: str
+    importance: str = "core"  # "core" (required/central) | "secondary" (nice-to-have)
+
+
+class JobProfile(BaseModel):
+    """Standardized, résumé-independent profile of a job (for the DB index)."""
+
+    is_software_engineering: bool = True
+    role_category: str = "other"
+    seniority: str = ""
+    skills: List[SkillTag] = Field(default_factory=list)
+
+
+class ResumeProfile(BaseModel):
+    """Standardized profile of a candidate, in the same vocabulary as jobs."""
+
+    role_categories: List[str] = Field(default_factory=list)
+    seniority: str = ""
+    skills: List[str] = Field(default_factory=list)
+
+
 class RankedJob(BaseModel):
     job: JobPosting
     heuristic_score: float
@@ -63,13 +85,23 @@ class RunCost(BaseModel):
     estimated_usd: Optional[float] = None
 
 
+class IndexResponse(BaseModel):
+    scraped: int
+    indexed: int
+    new: int
+    skipped_non_swe: int
+    db_total_jobs: int
+    db_total_skills: int
+    jobs: List[JobBrief] = Field(default_factory=list)
+    cost: Optional[RunCost] = None
+    notes: List[str] = Field(default_factory=list)
+
+
 class MatchResponse(BaseModel):
-    requested_country: str
-    max_jobs_to_fetch: int
-    top_n_sent_to_llm: int
-    total_jobs_found: int
-    total_jobs_after_country_filter: int
-    ranked_jobs: List[RankedJob]
+    db_total_jobs: int
+    shortlist_size: int
+    resume_skills: List[str] = Field(default_factory=list)
+    ranked_jobs: List[RankedJob] = Field(default_factory=list)
     fetched_jobs: List[JobBrief] = Field(default_factory=list)
     cost: Optional[RunCost] = None
     notes: List[str] = Field(default_factory=list)

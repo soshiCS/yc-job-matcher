@@ -1,31 +1,32 @@
 # YC Job Matcher
 
-A small end-to-end app that lets a user:
+A small end-to-end app with two flows:
 
-- upload a resume
-- choose a target country (hard location filter)
-- choose a role (engineering, design, product, …)
-- optionally filter by required years of experience
-- choose how many jobs to send to the LLM
-- fetch a limited set of YC jobs
-- pre-rank jobs cheaply
-- send only the top N candidates to the LLM
-- return the best-fit jobs with explanations
+- **Index jobs** — scrape YC jobs, have the LLM profile each into a standardized form
+  (role category, seniority, canonical skills), and store software-engineering jobs in
+  a local database. Résumé-independent; the only flow that scrapes.
+- **Match my résumé** — profile a résumé into the same vocabulary, **shortlist** the
+  most similar saved jobs by skill overlap with a plain SQL query (no LLM per job),
+  then have the LLM score only that shortlist for interview probability.
 
 ## What this app does
 
-This app is designed to keep LLM cost down.
+It's designed to keep LLM cost down by separating the **expensive, one-time**
+indexing from **cheap, repeatable** matching.
 
-Instead of sending every job to the LLM, it uses a two-stage ranking pipeline:
+- Each job is profiled by the LLM **once** when indexed, then reused forever.
+- A new résumé costs ~**2 LLM calls total** (profile the résumé + score the
+  shortlist), no matter how many jobs are in the database — because the database does
+  the candidate selection (skill-overlap shortlist) instead of the LLM.
 
-1. **Cheap prefilter**
-   - extract resume text
-   - scrape a limited pool of YC jobs
-   - filter by country/location
-   - score jobs with lightweight heuristics
-2. **LLM evaluation**
-   - only the top `N` pre-ranked jobs are sent to the LLM
-   - the LLM returns a structured score, reasoning, gaps, and a short summary
+### The canonical skill vocabulary
+
+Matching by skill overlap only works if a job tagged `JVM` and a résumé tagged
+`Java Virtual Machine` resolve to the same string. So skills live in a single,
+growing canonical set: when profiling a job or résumé, the LLM is shown the existing
+skill vocabulary and told to **reuse an existing name** when a skill means the same
+thing, and only **add a new one** when it's genuinely novel. Role category and
+seniority use small **fixed enums** (always aligned).
 
 ## How jobs are fetched
 
@@ -39,26 +40,30 @@ YC's experience filter runs entirely client-side via a logged-in Algolia session
 that can't be replicated with plain HTTP, so we let YC's own JavaScript run the
 search and read the results.
 
-## Saved jobs (database)
+## Database
 
-Every software-engineering job the LLM evaluates is saved to a local SQLite database
-(`jobs.db` by default; set `JOBS_DB_PATH` to change). Non-software-engineering roles
-are not stored.
+A local SQLite database (`jobs.db` by default; set `JOBS_DB_PATH`). Only
+software-engineering jobs are stored, keyed by YC job id (upsert → no duplicates).
 
-- **No duplicates:** rows are keyed by the YC job id and upserted — re-running just
-  refreshes a job's evaluation (its `first_seen_at` is preserved).
-- **Stored per job:** everything handed to the LLM (title, company, location,
-  country, remote, min experience, salary, equity, skills, full description) plus the
-  LLM result (interview probability, confidence, fit summary, strengths, gaps,
-  reasoning, should-apply) and timestamps.
-- **Indexed for queries:** `min_experience_years`, `remote`, `country`, `company`,
-  and `interview_probability`. Example:
-  ```sql
-  SELECT title, company, interview_probability
-  FROM jobs
-  WHERE min_experience_years <= 3 AND remote = 'yes'
-  ORDER BY interview_probability DESC;
-  ```
+Tables:
+- `jobs` — one row per job with its standardized profile: title, company, location,
+  country, remote, min experience (label + years), salary, equity, summary, full text,
+  `role_category`, `seniority`, timestamps.
+- `skills` — the growing canonical skill vocabulary (`name` unique, case-insensitive).
+- `job_skills` — which skills each job has (drives the overlap shortlist).
+
+Indexed on `role_category`, `min_experience_years`, `remote`, `country`, and
+`job_skills(skill_id)`. Example queries:
+```sql
+-- the canonical skill vocabulary
+SELECT name FROM skills ORDER BY name;
+
+-- jobs sharing the most skills with a set you care about
+SELECT j.title, j.company, COUNT(*) AS overlap
+FROM job_skills js JOIN jobs j ON j.job_id = js.job_id
+WHERE js.skill_id IN (SELECT id FROM skills WHERE name IN ('JVM','C++','Distributed Systems'))
+GROUP BY js.job_id ORDER BY overlap DESC;
+```
 
 ## Stack
 
@@ -73,14 +78,14 @@ are not stored.
 ```text
 login.py            # one-time login for the authenticated source
 app/
-  main.py
+  main.py             # /api/index and /api/match endpoints
   config.py
   models.py
-  llm.py
-  ranker.py
+  taxonomy.py         # fixed role_category / seniority enums
+  llm.py              # job + résumé profiling, shortlist scoring
   resume_parser.py
   yc_browser.py       # authenticated headless-browser search
-  db.py               # SQLite persistence for evaluated SWE jobs
+  db.py               # SQLite index: jobs, skills, job_skills
   static/
     styles.css
     app.js
@@ -166,26 +171,31 @@ session has expired — re-run `python login.py`.
 
 ## API
 
-### `POST /api/match`
+### `POST /api/index` — scrape + profile + store
+
+Multipart form data (no résumé):
+
+- `country`: string (location filter; `Any` disables it)
+- `role`: one of Engineering, Design, Product, Science, Recruiting, Operations, Sales, Marketing, Legal, Finance (default Engineering)
+- `experience_levels`: zero or more of `0-1`, `1-3`, `3-6`, `6+`
+- `remote_levels`: zero or more of `remote-ok`, `remote-only`, `not-remote`
+- `max_jobs_to_fetch`: int — how many to scrape
+- `start_index`: int — skip this many first (paging across runs)
+
+Returns counts (scraped / indexed / new / skipped-non-SWE), the current database
+totals, and the list of indexed jobs.
+
+### `POST /api/match` — match a résumé against saved jobs
 
 Multipart form data:
 
 - `resume`: file
-- `country`: string (location filter applied server-side by YC; `Any` disables it)
-- `role`: string — one of Engineering, Design, Product, Science, Recruiting, Operations, Sales, Marketing, Legal, Finance (defaults to Engineering)
-- `experience_levels`: zero or more of `0-1`, `1-3`, `3-6`, `6+` (repeated field), filtered server-side by YC. Leave empty for any level.
-- `remote_levels`: zero or more of `remote-ok`, `remote-only`, `not-remote` (repeated field), filtered server-side by YC. Leave empty to include all.
-- `top_n`: int
-- `max_jobs_to_fetch`: int
+- `shortlist_size`: int — how many DB candidates to LLM-evaluate (default 10)
+- `top_n`: int — how many results to show (default 8)
 
-Returns ranked jobs with:
-
-- heuristic pre-score
-- LLM score
-- fit summary
-- strengths
-- gaps
-- reasons
+Profiles the résumé, shortlists saved jobs by skill overlap (SQL), LLM-scores the
+shortlist, and returns ranked jobs with interview probability, fit summary,
+strengths, gaps, reasoning, and the résumé's extracted skills.
 
 ## Future improvements
 
