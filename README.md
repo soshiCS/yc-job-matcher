@@ -202,7 +202,9 @@ scrapes newest-first, skips jobs it already has, and collects up to
 `max_jobs_to_fetch` genuinely new ones — grabbing fresh top postings first, then
 going deeper. Re-running never creates duplicates.
 
-Returns counts (new / indexed / skipped-non-SWE), the current database totals, and
+Returns counts (new / indexed / skipped-non-SWE), **the total number of matching
+companies YC lists for these filters** (Algolia `nbHits` — the directory is
+company-centric, so this is companies, not jobs), the current database totals, and
 the list of indexed jobs.
 
 ### `POST /api/match` — match a résumé against saved jobs

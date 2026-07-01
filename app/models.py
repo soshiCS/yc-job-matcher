@@ -90,6 +90,7 @@ class IndexResponse(BaseModel):
     indexed: int
     new: int
     skipped_non_swe: int
+    total_matching_companies: Optional[int] = None
     db_total_jobs: int
     db_total_skills: int
     jobs: List[JobBrief] = Field(default_factory=list)

@@ -56,7 +56,8 @@ indexForm.addEventListener("submit", async (e) => {
     indexStatus.textContent = "Done.";
     indexResults.innerHTML =
       `<div class="note-card">
-        <strong>Scraped:</strong> ${p.scraped} &nbsp;|&nbsp;
+        ${p.total_matching_companies != null ? `<strong>YC matching companies (these filters):</strong> ${p.total_matching_companies}<br />` : ""}
+        <strong>New jobs found:</strong> ${p.scraped} &nbsp;|&nbsp;
         <strong>Indexed (SWE):</strong> ${p.indexed} (${p.new} new) &nbsp;|&nbsp;
         <strong>Skipped non-SWE:</strong> ${p.skipped_non_swe}<br />
         <strong>Database now:</strong> ${p.db_total_jobs} jobs, ${p.db_total_skills} skills<br />

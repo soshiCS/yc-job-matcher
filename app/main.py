@@ -104,7 +104,7 @@ async def index_jobs(
     notes: list[str] = []
     known_ids = db.all_job_ids()
     try:
-        jobs = await run_in_threadpool(
+        jobs, total_companies = await run_in_threadpool(
             search_jobs,
             role=role,
             country=country,
@@ -118,10 +118,12 @@ async def index_jobs(
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"Scrape failed: {exc}") from exc
 
+    if total_companies is not None:
+        notes.append(f"YC lists {total_companies} matching companies for these filters.")
     notes.append(
         f"Found {len(jobs)} new jobs (skipped {len(known_ids)} already indexed while scrolling)."
     )
-    print(f"\n[index] {len(jobs)} new jobs; {len(known_ids)} already known")
+    print(f"\n[index] {len(jobs)} new jobs; {len(known_ids)} known; {total_companies} matching companies")
 
     cost: RunCost | None = None
     indexed = new = 0
@@ -152,6 +154,7 @@ async def index_jobs(
         indexed=indexed,
         new=new,
         skipped_non_swe=skipped,
+        total_matching_companies=total_companies,
         db_total_jobs=total_jobs,
         db_total_skills=total_skills,
         jobs=saved_briefs,

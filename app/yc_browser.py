@@ -231,8 +231,11 @@ def search_jobs(
     remote_levels: list[str] | None = None,
     limit: int,
     exclude_ids: set[str] | None = None,
-) -> list[JobPosting]:
-    """Return up to `limit` jobs that are NOT already in `exclude_ids`.
+) -> tuple[list[JobPosting], int | None]:
+    """Return (up to `limit` new jobs, total matching companies) for the filters.
+
+    The second value is YC's Algolia `nbHits` — the number of *companies* matching
+    these filters (the directory is company-centric), or None if not captured.
 
     Sorted newest-first, it scrolls from the top and skips job ids we've already
     indexed, collecting until it has `limit` genuinely new jobs (or the list is
@@ -256,6 +259,7 @@ def search_jobs(
 
     # job_id -> JobPosting, built from every /companies/fetch payload we see.
     by_id: dict[str, JobPosting] = {}
+    totals = {"companies": None}  # Algolia nbHits = matching companies for the filters.
 
     def grab(response):
         if "/companies/fetch" not in response.url:
@@ -270,10 +274,22 @@ def search_jobs(
                 if jid and jid not in by_id:
                     by_id[jid] = _jobposting_from_fetch(job, company)
 
+    def grab_total(response):
+        if "algolia.net" not in response.url or "/queries" not in response.url:
+            return
+        try:
+            for res in response.json().get("results", []):
+                nb = res.get("nbHits")
+                if "CompanyJob" in (res.get("index") or "") and isinstance(nb, int):
+                    totals["companies"] = max(totals["companies"] or 0, nb)
+        except Exception:
+            pass
+
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         context = browser.new_context(storage_state=str(STORAGE_STATE_PATH))
         context.on("response", grab)
+        context.on("response", grab_total)
         page = context.new_page()
         page.goto(url, wait_until="networkidle", timeout=60_000)
         page.wait_for_timeout(2500)
@@ -319,4 +335,5 @@ def search_jobs(
         browser.close()
 
     window = collected[:limit]
-    return [by_id[jid] for jid in window if jid in by_id]
+    jobs = [by_id[jid] for jid in window if jid in by_id]
+    return jobs, totals["companies"]
