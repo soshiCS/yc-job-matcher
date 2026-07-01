@@ -93,6 +93,15 @@ def get_all_skill_names() -> list[str]:
         conn.close()
 
 
+def all_job_ids() -> set[str]:
+    """Every job id already indexed — the server-side 'where we left off' memory."""
+    conn = _connect()
+    try:
+        return {row["job_id"] for row in conn.execute("SELECT job_id FROM jobs")}
+    finally:
+        conn.close()
+
+
 def counts() -> tuple[int, int]:
     conn = _connect()
     try:

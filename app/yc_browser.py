@@ -141,6 +141,7 @@ def build_search_url(
     country: str | None,
     experience_levels: list[str] | None,
     remote_levels: list[str] | None = None,
+    sort_by: str = "created_desc",
 ) -> str:
     params: list[tuple[str, str]] = [
         ("demographic", "any"),
@@ -150,7 +151,7 @@ def build_search_url(
         ("interviewProcess", "any"),
         ("jobType", "any"),
         ("layout", "list-compact"),
-        ("sortBy", "keyword"),
+        ("sortBy", sort_by),
         ("tab", "any"),
         ("usVisaNotRequired", "any"),
     ]
@@ -229,22 +230,22 @@ def search_jobs(
     experience_levels: list[str] | None,
     remote_levels: list[str] | None = None,
     limit: int,
-    offset: int = 0,
+    exclude_ids: set[str] | None = None,
 ) -> list[JobPosting]:
-    """Run the authenticated company search and return matching jobs (rich data).
+    """Return up to `limit` jobs that are NOT already in `exclude_ids`.
 
-    Drives a headless browser with the saved session, lets YC's own JS run the
-    Algolia-backed filtered search, harvests the `/companies/fetch` payloads for
-    full job data, and uses the rendered DOM to know which job ids actually
-    matched the filters (and in what order). Scrolls until it has `offset + limit`
-    results, then returns the window `[offset : offset + limit]` so callers can
-    page through the list across runs.
+    Sorted newest-first, it scrolls from the top and skips job ids we've already
+    indexed, collecting until it has `limit` genuinely new jobs (or the list is
+    exhausted). This makes indexing resume from where we left off — new postings at
+    the top are grabbed first, then it goes deeper into older unseen jobs — using the
+    caller's set of known ids as the only "cursor".
     """
     if not STORAGE_STATE_PATH.exists():
         raise WaaSAuthError(
             "No saved login session. Run `python login.py` first to authenticate."
         )
 
+    exclude = exclude_ids or set()
     sync_playwright = _import_playwright()
     url = build_search_url(
         role=role,
@@ -295,20 +296,27 @@ def search_jobs(
                     ids.append(m.group(1))
             return ids
 
-        target = offset + limit
-        ordered = matched_ids()
+        def fresh_ids() -> list[str]:
+            return [jid for jid in matched_ids() if jid not in exclude]
+
+        # Scroll until we have `limit` unseen jobs, or the list stops growing.
+        # Stagnation is judged by total loaded (we may be skipping known jobs while
+        # still making progress downward).
+        prev_total = len(matched_ids())
+        collected = fresh_ids()
         stagnant = 0
-        while len(ordered) < target and stagnant < 3:
+        while len(collected) < limit and stagnant < 4:
             page.mouse.wheel(0, 20_000)
             page.wait_for_timeout(2000)
-            new_ordered = matched_ids()
-            if len(new_ordered) <= len(ordered):
+            total = len(matched_ids())
+            if total <= prev_total:
                 stagnant += 1
             else:
                 stagnant = 0
-            ordered = new_ordered
+            prev_total = total
+            collected = fresh_ids()
 
         browser.close()
 
-    window = ordered[offset : offset + limit]
+    window = collected[:limit]
     return [by_id[jid] for jid in window if jid in by_id]

@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>YC Job Matcher</title>
-    <link rel="stylesheet" href="/static/styles.css?v=5" />
+    <link rel="stylesheet" href="/static/styles.css?v=6" />
   </head>
   <body>
     <div class="page">
@@ -64,15 +64,10 @@
           </div>
         </div>
 
-        <div class="grid-two">
-          <div class="field">
-            <label for="i_max">How many jobs to scrape</label>
-            <input id="i_max" name="max_jobs_to_fetch" type="number" min="1" max="80" value="40" required />
-          </div>
-          <div class="field">
-            <label for="i_start">Start from job #</label>
-            <input id="i_start" name="start_index" type="number" min="0" value="0" required />
-          </div>
+        <div class="field">
+          <label for="i_max">How many NEW jobs to add</label>
+          <input id="i_max" name="max_jobs_to_fetch" type="number" min="1" max="80" value="40" required />
+          <small class="hint">Automatically continues from what's already saved — skips jobs already in the database and grabs new ones (newest first).</small>
         </div>
 
         <button id="index-btn" type="submit">Index jobs</button>
@@ -108,6 +103,6 @@
       </form>
     </div>
 
-    <script src="/static/app.js?v=5"></script>
+    <script src="/static/app.js?v=6"></script>
   </body>
 </html>

@@ -179,11 +179,16 @@ Multipart form data (no résumé):
 - `role`: one of Engineering, Design, Product, Science, Recruiting, Operations, Sales, Marketing, Legal, Finance (default Engineering)
 - `experience_levels`: zero or more of `0-1`, `1-3`, `3-6`, `6+`
 - `remote_levels`: zero or more of `remote-ok`, `remote-only`, `not-remote`
-- `max_jobs_to_fetch`: int — how many to scrape
-- `start_index`: int — skip this many first (paging across runs)
+- `max_jobs_to_fetch`: int — how many **new** jobs to add this run
 
-Returns counts (scraped / indexed / new / skipped-non-SWE), the current database
-totals, and the list of indexed jobs.
+**Auto-resumes.** There is no start position: the endpoint reads which job ids are
+already in the database (server-side, so it's shared across browsers/refreshes),
+scrapes newest-first, skips jobs it already has, and collects up to
+`max_jobs_to_fetch` genuinely new ones — grabbing fresh top postings first, then
+going deeper. Re-running never creates duplicates.
+
+Returns counts (new / indexed / skipped-non-SWE), the current database totals, and
+the list of indexed jobs.
 
 ### `POST /api/match` — match a résumé against saved jobs
 

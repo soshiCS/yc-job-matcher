@@ -71,23 +71,22 @@ async def index_jobs(
     experience_levels: List[str] = Form(default=[]),
     remote_levels: List[str] = Form(default=[]),
     max_jobs_to_fetch: int = Form(40),
-    start_index: int = Form(0),
 ):
-    """Scrape jobs from YC, profile each into a standardized form, and store them.
+    """Scrape NEW jobs from YC, profile each into a standardized form, and store them.
 
-    Résumé-independent. This is the only flow that scrapes; it builds the database
-    the match flow queries.
+    Résumé-independent. Resumes automatically: it skips any job already in the
+    database (server-side memory) and collects up to `max_jobs_to_fetch` genuinely
+    new jobs — grabbing fresh top postings first, then going deeper.
     """
     if max_jobs_to_fetch < 1 or max_jobs_to_fetch > settings.max_fetched_jobs:
         raise HTTPException(
             status_code=400,
             detail=f"max_jobs_to_fetch must be between 1 and {settings.max_fetched_jobs}",
         )
-    if start_index < 0:
-        raise HTTPException(status_code=400, detail="start_index must be 0 or greater")
     _validate_filters(role, experience_levels, remote_levels)
 
     notes: list[str] = []
+    known_ids = db.all_job_ids()
     try:
         jobs = await run_in_threadpool(
             search_jobs,
@@ -96,15 +95,17 @@ async def index_jobs(
             experience_levels=experience_levels,
             remote_levels=remote_levels,
             limit=max_jobs_to_fetch,
-            offset=start_index,
+            exclude_ids=known_ids,
         )
     except WaaSAuthError as exc:
         raise HTTPException(status_code=401, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"Scrape failed: {exc}") from exc
 
-    notes.append(f"Scraped {len(jobs)} jobs (window {start_index}–{start_index + len(jobs)}).")
-    print(f"\n[index] scraped {len(jobs)} jobs")
+    notes.append(
+        f"Found {len(jobs)} new jobs (skipped {len(known_ids)} already indexed while scrolling)."
+    )
+    print(f"\n[index] {len(jobs)} new jobs; {len(known_ids)} already known")
 
     cost: RunCost | None = None
     indexed = new = 0
