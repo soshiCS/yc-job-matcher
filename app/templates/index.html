@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>YC Job Matcher</title>
-    <link rel="stylesheet" href="/static/styles.css?v=6" />
+    <link rel="stylesheet" href="/static/styles.css?v=7" />
   </head>
   <body>
     <div class="page">
@@ -101,8 +101,16 @@
         <div id="match-notes" class="notes"></div>
         <div id="match-results" class="results"></div>
       </form>
+
+      <!-- ===================== MAINTENANCE ===================== -->
+      <div class="card">
+        <h2 class="card-title">Maintenance</h2>
+        <p class="card-sub">Remove jobs from the database that are no longer live on YC (filled or removed).</p>
+        <button id="prune-btn" type="button">Prune removed jobs</button>
+        <div id="prune-status" class="status"></div>
+      </div>
     </div>
 
-    <script src="/static/app.js?v=6"></script>
+    <script src="/static/app.js?v=7"></script>
   </body>
 </html>

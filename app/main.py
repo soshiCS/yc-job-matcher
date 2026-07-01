@@ -13,6 +13,7 @@ from fastapi.templating import Jinja2Templates
 from . import db
 from .config import settings
 from .llm import JobFitLLM, LLMUnavailableError
+from .prune import prune_removed_jobs
 from .models import IndexResponse, JobBrief, MatchResponse, RankedJob, RunCost
 from .resume_parser import ResumeParsingError, extract_resume_text
 from .yc_browser import (
@@ -43,6 +44,21 @@ templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
 @app.get("/", response_class=HTMLResponse)
 def index(request: Request):
     return templates.TemplateResponse("index.html", {"request": request})
+
+
+@app.post("/api/prune")
+async def prune():
+    """Remove jobs no longer live on YC (filled/removed) from the database."""
+    result = await run_in_threadpool(prune_removed_jobs, False)
+    total_jobs, total_skills = db.counts()
+    return {
+        "checked": result["checked"],
+        "alive": result["alive"],
+        "removed": result["removed"],
+        "unknown": result["unknown"],
+        "db_total_jobs": total_jobs,
+        "db_total_skills": total_skills,
+    }
 
 
 def _validate_filters(role: str, experience_levels: list[str], remote_levels: list[str]):

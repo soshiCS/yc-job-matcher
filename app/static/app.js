@@ -131,6 +131,28 @@ function renderMatch(p) {
   matchResults.innerHTML = header + cards;
 }
 
+// ---------------- Prune removed jobs ----------------
+const pruneBtn = document.getElementById("prune-btn");
+const pruneStatus = document.getElementById("prune-status");
+
+pruneBtn.addEventListener("click", async () => {
+  pruneStatus.textContent = "Checking every saved job on YC…";
+  pruneBtn.disabled = true;
+  try {
+    const res = await fetch("/api/prune", { method: "POST" });
+    const p = await res.json();
+    if (!res.ok) throw new Error(p.detail || "Prune failed.");
+    pruneStatus.innerHTML =
+      `Checked ${p.checked} — <strong>removed ${p.removed}</strong>, ` +
+      `${p.alive} still live${p.unknown ? `, ${p.unknown} unchecked (kept)` : ""}. ` +
+      `Database now: ${p.db_total_jobs} jobs.`;
+  } catch (err) {
+    pruneStatus.innerHTML = `<span class="error">${escapeHtml(err.message || "Something went wrong.")}</span>`;
+  } finally {
+    pruneBtn.disabled = false;
+  }
+});
+
 matchForm.addEventListener("submit", async (e) => {
   e.preventDefault();
   matchStatus.textContent = "Profiling résumé and matching…";

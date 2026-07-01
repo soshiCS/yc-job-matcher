@@ -65,6 +65,19 @@ WHERE js.skill_id IN (SELECT id FROM skills WHERE name IN ('JVM','C++','Distribu
 GROUP BY js.job_id ORDER BY overlap DESC;
 ```
 
+## Pruning removed jobs
+
+The index only ever adds jobs, so postings that get filled or removed on YC would
+otherwise linger. Run this periodically to drop them:
+
+```bash
+python prune.py            # remove jobs no longer live on YC
+python prune.py --dry-run  # preview what would be removed
+```
+
+It checks each saved job's public page (no LLM): a `404` (or redirect / empty
+payload) means gone → removed; anything that just errors transiently is kept.
+
 ## Stack
 
 - **Backend:** FastAPI
@@ -77,6 +90,7 @@ GROUP BY js.job_id ORDER BY overlap DESC;
 
 ```text
 login.py            # one-time login for the authenticated source
+prune.py            # remove filled/removed jobs from the DB (run periodically)
 app/
   main.py             # /api/index and /api/match endpoints
   config.py
@@ -86,6 +100,7 @@ app/
   resume_parser.py
   yc_browser.py       # authenticated headless-browser search
   db.py               # SQLite index: jobs, skills, job_skills
+  prune.py            # detect + remove jobs no longer live on YC
   static/
     styles.css
     app.js

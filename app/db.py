@@ -93,6 +93,21 @@ def get_all_skill_names() -> list[str]:
         conn.close()
 
 
+def delete_jobs(job_ids: list[str]) -> int:
+    """Remove jobs (and their skill links) from the index. Returns rows deleted."""
+    if not job_ids:
+        return 0
+    conn = _connect()
+    try:
+        placeholders = ",".join("?" for _ in job_ids)
+        conn.execute(f"DELETE FROM job_skills WHERE job_id IN ({placeholders})", job_ids)
+        cur = conn.execute(f"DELETE FROM jobs WHERE job_id IN ({placeholders})", job_ids)
+        conn.commit()
+        return cur.rowcount
+    finally:
+        conn.close()
+
+
 def all_job_ids() -> set[str]:
     """Every job id already indexed — the server-side 'where we left off' memory."""
     conn = _connect()
